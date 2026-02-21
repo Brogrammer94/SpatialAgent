@@ -14,7 +14,7 @@ Key features:
 - **Plan-Act-Conclude architecture** with direct code execution
 - **72 specialized tools** for database queries, literature mining, spatial analytics, and genomic analysis
 - **17 skill templates** for guided workflows (annotation, CCI, panel design, spatial mapping, etc.)
-- **Multi-model support**: Claude, GPT, and Gemini model families
+- **Multi-model support**: Claude, GPT, Gemini, OpenRouter, z.AI, and local OpenAI-compatible model gateways
 
 ### Installation
 
@@ -26,7 +26,12 @@ conda activate spatial_agent
 # Set API keys
 export ANTHROPIC_API_KEY=your_key    # For Claude models
 export OPENAI_API_KEY=your_key       # For GPT models
-export GOOGLE_API_KEY=your_key       # For Gemini models (optional)
+export GEMINI_API_KEY=your_key       # For Gemini models (optional)
+
+# Optional: OpenAI-compatible providers
+export OPENROUTER_API_KEY=your_key   # OpenRouter
+export ZAI_API_KEY=your_key          # z.AI
+export LOCAL_LLM_BASE_URL=http://localhost:11434/v1  # Local gateway (Ollama/vLLM/LM Studio)
 ```
 
 ### Quick Start
@@ -43,6 +48,15 @@ result = agent.run(
     "Find mouse brain cortex datasets from CZI and analyze neuronal cell types",
     config={"thread_id": "analysis_1"}
 )
+
+# Use OpenRouter
+llm = make_llm("openrouter/openai/gpt-4o-mini")
+
+# Use z.AI
+llm = make_llm("zai/glm-4.6")
+
+# Use local model gateway
+llm = make_llm("local/qwen2.5:14b")
 ```
 
 ### Project Structure
