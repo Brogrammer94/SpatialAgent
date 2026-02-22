@@ -1,5 +1,6 @@
 """
-Simplified LLM Factory for Azure OpenAI, OpenAI, Anthropic Claude, Google Gemini, and AWS Bedrock
+Simplified LLM Factory for Azure OpenAI, OpenAI, Anthropic Claude, Google Gemini,
+AWS Bedrock, and OpenAI-compatible endpoints (OpenRouter, z.AI, local gateways).
 """
 
 import os
@@ -57,6 +58,53 @@ class BedrockConfig:
 def _is_bedrock_model(model: str) -> bool:
     """Check if model is an AWS Bedrock model."""
     return any(model.startswith(prefix) for prefix in BEDROCK_MODEL_PREFIXES)
+
+
+def _resolve_openai_compatible_routing(model: str) -> tuple[str, str, str, dict] | None:
+    """Resolve routing for OpenAI-compatible endpoints.
+
+    Returns:
+        Tuple of (resolved_model, base_url, api_key, default_headers) if routing should
+        use ChatOpenAI with a custom endpoint, otherwise None.
+    """
+    custom_base_url = (
+        os.environ.get("CUSTOM_LLM_BASE_URL")
+        or os.environ.get("CUSTOM_MODEL_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or ""
+    )
+    custom_api_key = (
+        os.environ.get("CUSTOM_LLM_API_KEY")
+        or os.environ.get("CUSTOM_MODEL_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or "EMPTY"
+    )
+    default_headers = {}
+
+    resolved_model = model
+
+    # Explicit provider prefixes (keeps routing unambiguous)
+    if model.startswith("openrouter/"):
+        resolved_model = model.split("/", 1)[1]
+        custom_base_url = custom_base_url or os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        custom_api_key = os.environ.get("OPENROUTER_API_KEY", custom_api_key)
+        if os.environ.get("OPENROUTER_HTTP_REFERER"):
+            default_headers["HTTP-Referer"] = os.environ["OPENROUTER_HTTP_REFERER"]
+        if os.environ.get("OPENROUTER_APP_TITLE"):
+            default_headers["X-Title"] = os.environ["OPENROUTER_APP_TITLE"]
+    elif model.startswith("zai/"):
+        resolved_model = model.split("/", 1)[1]
+        custom_base_url = custom_base_url or os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/paas/v4")
+        custom_api_key = os.environ.get("ZAI_API_KEY", custom_api_key)
+    elif model.startswith("local/"):
+        resolved_model = model.split("/", 1)[1]
+        custom_base_url = custom_base_url or os.environ.get("LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+        custom_api_key = os.environ.get("LOCAL_LLM_API_KEY", custom_api_key)
+
+    if custom_base_url:
+        return resolved_model, custom_base_url, custom_api_key, default_headers
+
+    return None
 
 
 # Model configurations
@@ -182,7 +230,7 @@ def make_llm(
     **kwargs
 ):
     """
-    Create LLM instance. Supports OpenAI, Azure OpenAI, Anthropic, Bedrock, and Google Gemini.
+    Create LLM instance. Supports OpenAI, Azure OpenAI, Anthropic, Bedrock, Google Gemini, and OpenAI-compatible endpoints.
 
     Configuration priority:
         1. AZURE_API_KEY + AZURE_API_ENDPOINT set → Azure OpenAI
@@ -192,6 +240,11 @@ def make_llm(
         AZURE_API_KEY: Azure OpenAI API key
         AZURE_API_ENDPOINT: Azure OpenAI endpoint URL
         AZURE_DEPLOYMENT_NAME: Azure deployment name (defaults to model name)
+        CUSTOM_LLM_BASE_URL / CUSTOM_MODEL_BASE_URL / OPENAI_BASE_URL: OpenAI-compatible base URL
+        CUSTOM_LLM_API_KEY / CUSTOM_MODEL_API_KEY: API key for custom OpenAI-compatible endpoint
+        OPENROUTER_API_KEY, OPENROUTER_BASE_URL: OpenRouter credentials/routing
+        ZAI_API_KEY, ZAI_BASE_URL: z.AI credentials/routing
+        LOCAL_LLM_BASE_URL, LOCAL_LLM_API_KEY: local model gateway routing
 
     Args:
         model: Model name (e.g., "gpt-4o", "claude-sonnet-4-5-20250929", "gemini-2.5-pro")
@@ -210,20 +263,39 @@ def make_llm(
     if track_cost:
         callbacks.append(CostCallback(model))
 
-    # # Custom OpenAI-compatible endpoint (LiteLLM, vLLM, Ollama, etc.) - currently not used
-    # custom_base_url = os.environ.get("CUSTOM_MODEL_BASE_URL", "")
-    # custom_api_key = os.environ.get("CUSTOM_MODEL_API_KEY", "EMPTY")
-    # if custom_base_url:
-    #     from langchain_openai import ChatOpenAI
-    #     return ChatOpenAI(
-    #         model=model,
-    #         base_url=custom_base_url,
-    #         api_key=custom_api_key if custom_api_key else "EMPTY",
-    #         callbacks=callbacks,
-    #         temperature=temperature,
-    #         streaming=streaming,
-    #         **kwargs
-    #     )
+    # OpenAI-compatible endpoint routing (OpenRouter, z.AI, local, LiteLLM, vLLM, Ollama, etc.)
+    custom_route = _resolve_openai_compatible_routing(model)
+    if custom_route:
+        from langchain_openai import ChatOpenAI
+
+        resolved_model, custom_base_url, custom_api_key, default_headers = custom_route
+        stop_sequences = kwargs.pop("stop_sequences", DEFAULT_STOP_SEQUENCES)
+        explicit_headers = kwargs.pop("default_headers", {})
+
+        model_kwargs = {
+            "model": resolved_model,
+            "base_url": custom_base_url,
+            "api_key": custom_api_key if custom_api_key else "EMPTY",
+            "callbacks": callbacks,
+            "streaming": streaming,
+            **kwargs,
+        }
+
+        if default_headers:
+            model_kwargs["default_headers"] = {
+                **default_headers,
+                **explicit_headers,
+            }
+        elif explicit_headers:
+            model_kwargs["default_headers"] = explicit_headers
+
+        if not any(x in resolved_model.lower() for x in NO_STOP_MODELS):
+            model_kwargs["stop"] = stop_sequences
+
+        if not resolved_model.startswith(("o3", "o4")):
+            model_kwargs["temperature"] = temperature
+
+        return ChatOpenAI(**model_kwargs)
 
     # Google Gemini (using OpenAI-compatible endpoint for consistent response format)
     if "gemini" in model:
